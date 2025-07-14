@@ -8,13 +8,15 @@ struct IncomingFlight: Identifiable, Hashable, Codable {
     var scheduledTime: Date
     var actualArrivalTime: Date? // new, preferred
     var expectedArrivalTime: Date? // new, for E suffix
+    var bagAvailableTime: Date? // NEW: when bags are available for collection
+    var carousel: String? // NEW: baggage carousel number
     var notes: String
     var cancelled: Bool // new
     // Outgoing flights associated with this incoming flight
     var outgoingLinks: [OutgoingLink]
     var date: Date // Only the day component matters
     
-    init(flightNumber: String, terminal: String, origin: String, scheduledTime: Date, actualArrivalTime: Date? = nil, expectedArrivalTime: Date? = nil, notes: String = "", cancelled: Bool = false, date: Date = Date()) {
+    init(flightNumber: String, terminal: String, origin: String, scheduledTime: Date, actualArrivalTime: Date? = nil, expectedArrivalTime: Date? = nil, bagAvailableTime: Date? = nil, carousel: String? = nil, notes: String = "", cancelled: Bool = false, date: Date = Date()) {
         self.id = UUID()
         self.flightNumber = flightNumber
         self.terminal = terminal
@@ -22,6 +24,8 @@ struct IncomingFlight: Identifiable, Hashable, Codable {
         self.scheduledTime = scheduledTime
         self.actualArrivalTime = actualArrivalTime
         self.expectedArrivalTime = expectedArrivalTime
+        self.bagAvailableTime = bagAvailableTime
+        self.carousel = carousel
         self.notes = notes
         self.cancelled = cancelled
         self.outgoingLinks = []

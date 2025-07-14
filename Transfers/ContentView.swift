@@ -2,6 +2,7 @@ import SwiftUI
 import PDFKit
 internal import Combine
 import WebKit
+import SwiftSoup
 
 // 1. Define atRiskThreshold at the top level
 let atRiskThreshold: TimeInterval = 1 * 60 * 60
@@ -170,6 +171,7 @@ struct ContentView: View {
     @State private var selectedFlightForDetails: IncomingFlight? = nil
     @State private var showingUrgentOverlay = false
     @State private var showAllOutgoingInOverlay = false
+    @State private var webLoaderFlight: IncomingFlight? = nil
     
     var terminals: [String] {
         let allTerminals = incomingFlights.map { $0.terminal }
@@ -358,7 +360,10 @@ struct ContentView: View {
             IncomingFlightDetailsView(
                 flight: flight,
                 outgoingFlights: outgoingFlights,
-                onRefresh: { /* implement refresh logic here */ },
+                onRefresh: {
+                    // Show the background web loader for this flight
+                    webLoaderFlight = flight
+                },
                 onClose: { selectedFlightForDetails = nil }
             )
         }
@@ -371,6 +376,29 @@ struct ContentView: View {
                 onClose: { showingUrgentOverlay = false }
             )
         }
+        // Add the background web loader to the view hierarchy
+        .background(
+            Group {
+                if let flight = webLoaderFlight {
+                    BackgroundWebViewLoader(
+                        url: URL(string: "https://www.manchesterairport.co.uk/flight-information/arrivals/itinerary/?id=\(flight.flightNumber)-\(DateFormatter.with(format: "yyyyMMdd").string(from: flight.scheduledTime))A")!,
+                        scheduledTime: flight.scheduledTime,
+                        onResult: { bagTime, carousel in
+                            DispatchQueue.main.async {
+                                if let idx = incomingFlights.firstIndex(where: { $0.id == flight.id }) {
+                                    var updated = incomingFlights[idx]
+                                    updated.bagAvailableTime = bagTime
+                                    updated.carousel = carousel
+                                    incomingFlights[idx] = updated
+                                    selectedFlightForDetails = updated
+                                }
+                                webLoaderFlight = nil
+                            }
+                        }
+                    )
+                }
+            }
+        )
     }
     
     func addOutgoingFlight(to incomingID: UUID, outgoing: OutgoingFlight, bagCount: Int) {
@@ -977,9 +1005,7 @@ struct OutgoingFlightRowView: View {
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                 }
-                Text("To: \(outgoing.destination)")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                .padding(.leading, 24)
             }
             Spacer()
             Text(timeWithSuffix(for: outgoing))
@@ -1456,9 +1482,13 @@ struct ManchesterWebImportView: UIViewControllerRepresentable {
             const airline = row.querySelector('span[class*="w6c5ku"]')?.innerText;
             const terminal = row.querySelector('td:nth-child(3)')?.innerText;
             const status = row.querySelector('td:last-child')?.innerText;
+            const expectedTime = row.querySelector('span[class*="expected"]')?.innerText || null;
+            const cancelled = row.querySelector('span[class*="cancelled"]')?.innerText === 'Cancelled';
             const flightData = {
               scheduled_time: schedTime,
               actual_time: actualTime,
+              expected_time: expectedTime,
+              cancelled: cancelled,
               origin: origin,
               flight_number: flightNumber,
               airline: airline,
@@ -1529,7 +1559,7 @@ struct ManchesterWebImportView: UIViewControllerRepresentable {
                     origin: dict["origin"] as? String ?? "",
                     scheduledTime: parseTime(dict["scheduled_time"] as? String) ?? today(),
                     actualArrivalTime: parseTime(dict["actual_time"] as? String),
-                    expectedArrivalTime: nil, // Add if available
+                    expectedArrivalTime: parseTime(dict["expected_time"] as? String),
                     notes: statusLabel,
                     cancelled: isCancelled,
                     date: today()
@@ -2037,6 +2067,23 @@ struct IncomingFlightDetailsView: View {
                     .help("Update arrival data")
                 }
             }
+            // NEW: Bag available time and carousel
+            if let bagTime = flight.bagAvailableTime {
+                HStack(spacing: 8) {
+                    Image(systemName: "clock.badge.checkmark")
+                        .foregroundColor(.blue)
+                    Text("Bags available: \(formatTime(bagTime))")
+                        .font(.headline)
+                }
+            }
+            if let carousel = flight.carousel, !carousel.isEmpty {
+                HStack(spacing: 8) {
+                    Image(systemName: "suitcase")
+                        .foregroundColor(.orange)
+                    Text("Carousel: \(carousel)")
+                        .font(.headline)
+                }
+            }
             if flight.cancelled {
                 Text("CANCELLED")
                     .font(.title2).bold()
@@ -2122,5 +2169,414 @@ struct OutgoingUrgentOverlay: View {
         .cornerRadius(28)
         .shadow(color: .black.opacity(0.2), radius: 24, x: 0, y: 8)
         .padding(24)
+    }
+}
+
+// Helper: Fetch and parse collect time and carousel from the Arriving passenger section
+func fetchBagAvailableTimeAndCarousel(flightNumber: String, scheduledTime: Date, completion: @escaping (Date?, String?) -> Void) {
+    // Try multiple dates to handle overnight flights
+    let calendar = Calendar.current
+    let scheduledDate = scheduledTime
+    let previousDate = calendar.date(byAdding: .day, value: -1, to: scheduledDate) ?? scheduledDate
+    let nextDate = calendar.date(byAdding: .day, value: 1, to: scheduledDate) ?? scheduledDate
+    
+    let datesToTry = [scheduledDate, previousDate, nextDate]
+    
+    func tryDate(_ date: Date) {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd"
+        let dateString = formatter.string(from: date)
+        let urlString = "https://www.manchesterairport.co.uk/flight-information/arrivals/itinerary/?id=\(flightNumber)-\(dateString)A"
+        print("[DEBUG] Trying date: \(dateString) - URL: \(urlString)")
+        guard let url = URL(string: urlString) else { 
+            print("[DEBUG] Invalid URL for date: \(dateString)")
+            tryNextDate()
+            return 
+        }
+        
+        URLSession.shared.dataTask(with: url) { data, response, error in
+            guard let data = data, let html = String(data: data, encoding: .utf8) else { 
+                print("[DEBUG] No data or HTML for date: \(dateString)")
+                tryNextDate()
+                return 
+            }
+            // --- DIAGNOSTIC: Print first 1000 chars of HTML ---
+            print("[DEBUG] HTML preview for date \(dateString):\n" + html.prefix(1000))
+            do {
+                let doc = try SwiftSoup.parse(html)
+                // --- DIAGNOSTIC: Print all <p> tags and their text ---
+                let allPs = try doc.select("p")
+                print("[DEBUG] All <p> tags for date \(dateString):")
+                for p in allPs.array() {
+                    print("[DEBUG] <p>: \(try? p.text() ?? "nil")")
+                }
+                // Find the <h3> with 'Arriving passenger'
+                guard let arrivingHeader = try? doc.select("h3:matchesOwn(^Arriving passenger$)").first() else {
+                    print("[DEBUG] No 'Arriving passenger' header found for date: \(dateString)")
+                    tryNextDate()
+                    return
+                }
+                // Get the parent container
+                guard let parentContainer = try? arrivingHeader.parent() else {
+                    print("[DEBUG] No parent container for 'Arriving passenger' header for date: \(dateString)")
+                    tryNextDate()
+                    return
+                }
+                // Search all descendants for 'Collect your luggage'
+                let collectPs = try? parentContainer.select("*:contains(Collect your luggage)")
+                print("[DEBUG] Found \(collectPs?.array().count ?? 0) elements containing 'Collect your luggage' in parentContainer for date: \(dateString)")
+                if let timelineText = try? parentContainer.text() {
+                    print("[DEBUG] parentContainer text: \(timelineText)")
+                }
+                var found = false
+                for collectP in collectPs?.array() ?? [] {
+                    print("[DEBUG] Processing element: \(collectP.tagName()) with text: \(try? collectP.text() ?? "nil")")
+                    guard let parentDiv = try? collectP.parent() else { continue }
+                    // Find the closest preceding <b> for the time
+                    var timeText: String? = nil
+                    if let grandParent = try? parentDiv.parent() {
+                        let siblings = grandParent.getChildNodes()
+                        var foundSibling = false
+                        for node in siblings {
+                            if let elem = node as? Element, elem == parentDiv {
+                                foundSibling = true
+                                break
+                            }
+                            if let elem = node as? Element, elem.tagName() == "b" {
+                                timeText = (try? elem.text())
+                            }
+                        }
+                        if !foundSibling { timeText = nil }
+                    }
+                    print("[DEBUG] timeText: \(String(describing: timeText))")
+                    // Find the next sibling div for the carousel
+                    var carouselText: String? = nil
+                    if let nextDiv = try? parentDiv.nextElementSibling() {
+                        carouselText = (try? nextDiv.text())
+                    }
+                    print("[DEBUG] carouselText: \(String(describing: carouselText))")
+                    // Parse time (e.g., 23:41*)
+                    var bagTime: Date? = nil
+                    if let tText = timeText {
+                        let timeRegex = try NSRegularExpression(pattern: "(\\d{2}:\\d{2})", options: [])
+                        let timeMatch = timeRegex.firstMatch(in: tText, options: [], range: NSRange(location: 0, length: tText.utf16.count))
+                        if let match = timeMatch, let range = Range(match.range(at: 1), in: tText) {
+                            let timeStr = String(tText[range])
+                            let timeFormatter = DateFormatter()
+                            timeFormatter.dateFormat = "HH:mm"
+                            if let t = timeFormatter.date(from: timeStr) {
+                                let calendar = Calendar.current
+                                let hour = calendar.component(.hour, from: t)
+                                let minute = calendar.component(.minute, from: t)
+                                bagTime = calendar.date(bySettingHour: hour, minute: minute, second: 0, of: scheduledTime)
+                            }
+                        }
+                    }
+                    // Parse carousel (e.g., "Carousel 14" or "Carousel 04")
+                    var carousel: String? = nil
+                    if let cText = carouselText {
+                        let carouselRegex = try NSRegularExpression(pattern: "Carousel\\s*0*(\\d+)", options: .caseInsensitive)
+                        let carouselMatch = carouselRegex.firstMatch(in: cText, options: [], range: NSRange(location: 0, length: cText.utf16.count))
+                        if let match = carouselMatch, let range = Range(match.range(at: 1), in: cText) {
+                            carousel = String(cText[range])
+                        }
+                    }
+                    print("[DEBUG] Parsed bagTime: \(String(describing: bagTime)), carousel: \(String(describing: carousel))")
+                    completion(bagTime, carousel)
+                    found = true
+                    return
+                }
+                if !found {
+                    // Fallback: search the whole document for 'Collect your luggage' and check if it's after the header
+                    let allCollectPs = try? doc.select("*:contains(Collect your luggage)")
+                    print("[DEBUG] Fallback: Found \(allCollectPs?.array().count ?? 0) elements containing 'Collect your luggage' in whole doc for date: \(dateString)")
+                    for collectP in allCollectPs?.array() ?? [] {
+                        // Check if this element is after the arrivingHeader in the DOM
+                        if let headerIndex = try? arrivingHeader.elementSiblingIndex(),
+                           let collectIndex = try? collectP.elementSiblingIndex(),
+                           collectIndex > headerIndex {
+                            print("[DEBUG] Fallback: Processing element after header: \(collectP.tagName()) with text: \(try? collectP.text() ?? "nil")")
+                            guard let parentDiv = try? collectP.parent() else { continue }
+                            // Find the closest preceding <b> for the time
+                            var timeText: String? = nil
+                            if let grandParent = try? parentDiv.parent() {
+                                let siblings = grandParent.getChildNodes()
+                                var foundSibling = false
+                                for node in siblings {
+                                    if let elem = node as? Element, elem == parentDiv {
+                                        foundSibling = true
+                                        break
+                                    }
+                                    if let elem = node as? Element, elem.tagName() == "b" {
+                                        timeText = (try? elem.text())
+                                    }
+                                }
+                                if !foundSibling { timeText = nil }
+                            }
+                            print("[DEBUG] timeText: \(String(describing: timeText))")
+                            // Find the next sibling div for the carousel
+                            var carouselText: String? = nil
+                            if let nextDiv = try? parentDiv.nextElementSibling() {
+                                carouselText = (try? nextDiv.text())
+                            }
+                            print("[DEBUG] carouselText: \(String(describing: carouselText))")
+                            // Parse time (e.g., 23:41*)
+                            var bagTime: Date? = nil
+                            if let tText = timeText {
+                                let timeRegex = try NSRegularExpression(pattern: "(\\d{2}:\\d{2})", options: [])
+                                let timeMatch = timeRegex.firstMatch(in: tText, options: [], range: NSRange(location: 0, length: tText.utf16.count))
+                                if let match = timeMatch, let range = Range(match.range(at: 1), in: tText) {
+                                    let timeStr = String(tText[range])
+                                    let timeFormatter = DateFormatter()
+                                    timeFormatter.dateFormat = "HH:mm"
+                                    if let t = timeFormatter.date(from: timeStr) {
+                                        let calendar = Calendar.current
+                                        let hour = calendar.component(.hour, from: t)
+                                        let minute = calendar.component(.minute, from: t)
+                                        bagTime = calendar.date(bySettingHour: hour, minute: minute, second: 0, of: scheduledTime)
+                                    }
+                                }
+                            }
+                            // Parse carousel (e.g., "Carousel 14" or "Carousel 04")
+                            var carousel: String? = nil
+                            if let cText = carouselText {
+                                let carouselRegex = try NSRegularExpression(pattern: "Carousel\\s*0*(\\d+)", options: .caseInsensitive)
+                                let carouselMatch = carouselRegex.firstMatch(in: cText, options: [], range: NSRange(location: 0, length: cText.utf16.count))
+                                if let match = carouselMatch, let range = Range(match.range(at: 1), in: cText) {
+                                    carousel = String(cText[range])
+                                }
+                            }
+                            print("[DEBUG] Parsed bagTime: \(String(describing: bagTime)), carousel: \(String(describing: carousel))")
+                            completion(bagTime, carousel)
+                            return
+                        }
+                    }
+                }
+                print("[DEBUG] No 'Collect your luggage' step found in Arriving passenger section for date: \(dateString)")
+                tryNextDate()
+            } catch {
+                print("[DEBUG] Error parsing HTML for date: \(dateString) - \(error)")
+                tryNextDate()
+            }
+        }.resume()
+    }
+    
+    var currentDateIndex = 0
+    
+    func tryNextDate() {
+        currentDateIndex += 1
+        if currentDateIndex < datesToTry.count {
+            tryDate(datesToTry[currentDateIndex])
+        } else {
+            print("[DEBUG] Tried all dates (\(datesToTry.count)) - no data found")
+            completion(nil, nil)
+        }
+    }
+    
+    // Start with the first date
+    tryDate(datesToTry[currentDateIndex])
+}
+
+// Helper: Fetch and parse collect time and carousel using WKWebView (handles JS-loaded content)
+func fetchBagAvailableTimeAndCarouselWithWebView(flightNumber: String, scheduledTime: Date, completion: @escaping (Date?, String?) -> Void) {
+    let formatter = DateFormatter()
+    formatter.dateFormat = "yyyyMMdd"
+    let dateString = formatter.string(from: scheduledTime)
+    let urlString = "https://www.manchesterairport.co.uk/flight-information/arrivals/itinerary/?id=\(flightNumber)-\(dateString)A"
+    print("[DEBUG][WKWebView] Loading: \(urlString)")
+    let webView = WKWebView(frame: CGRect(x: -1000, y: -1000, width: 1, height: 1))
+    // webView.isHidden = true // REMOVE this line
+    let request = URLRequest(url: URL(string: urlString)!)
+    let navDelegate = WebViewNavDelegate { webView in
+        // JS: Find the timeline, then the 'Collect your luggage' step, and extract time and carousel
+        let js = """
+        (function() {
+            function getText(node) {
+                return node && node.innerText ? node.innerText.trim() : '';
+            }
+            // Find all timeline steps
+            var steps = Array.from(document.querySelectorAll('p')).filter(p => getText(p).toLowerCase().includes('collect your luggage'));
+            if (steps.length === 0) return JSON.stringify({ time: null, carousel: null });
+            var step = steps[0];
+            // Find the time (look for previous sibling with time)
+            var time = null;
+            var node = step.parentElement;
+            while (node && !time) {
+                var prev = node.previousElementSibling;
+                while (prev) {
+                    var txt = getText(prev);
+                    var match = txt.match(/\\d{2}:\\d{2}/);
+                    if (match) { time = match[0]; break; }
+                    prev = prev.previousElementSibling;
+                }
+                node = node.parentElement;
+            }
+            // Find carousel (look for next sibling with 'Carousel')
+            var carousel = null;
+            node = step.parentElement;
+            while (node && !carousel) {
+                var next = node.nextElementSibling;
+                while (next) {
+                    var txt = getText(next);
+                    var match = txt.match(/Carousel\\s*0*(\\d+)/i);
+                    if (match) { carousel = match[1]; break; }
+                    next = next.nextElementSibling;
+                }
+                node = node.parentElement;
+            }
+            return JSON.stringify({ time: time, carousel: carousel });
+        })();
+        """
+        webView.evaluateJavaScript(js) { result, error in
+            if let error = error {
+                print("[DEBUG][WKWebView] JS error: \(error)")
+                completion(nil, nil)
+                return
+            }
+            guard let jsonString = result as? String,
+                  let data = jsonString.data(using: .utf8),
+                  let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                print("[DEBUG][WKWebView] JS result parse error")
+                completion(nil, nil)
+                return
+            }
+            print("[DEBUG][WKWebView] JS result: \(dict)")
+            // Parse time
+            var bagTime: Date? = nil
+            if let timeStr = dict["time"] as? String {
+                let timeFormatter = DateFormatter()
+                timeFormatter.dateFormat = "HH:mm"
+                if let t = timeFormatter.date(from: timeStr) {
+                    let calendar = Calendar.current
+                    let hour = calendar.component(.hour, from: t)
+                    let minute = calendar.component(.minute, from: t)
+                    bagTime = calendar.date(bySettingHour: hour, minute: minute, second: 0, of: scheduledTime)
+                }
+            }
+            let carousel = dict["carousel"] as? String
+            completion(bagTime, carousel)
+        }
+    }
+    webView.navigationDelegate = navDelegate
+    UIApplication.shared.windows.first?.rootViewController?.view.addSubview(webView)
+    webView.load(request)
+}
+
+class WebViewNavDelegate: NSObject, WKNavigationDelegate {
+    let onFinish: (WKWebView) -> Void
+    init(onFinish: @escaping (WKWebView) -> Void) { self.onFinish = onFinish }
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { // Wait for JS to render
+            self.onFinish(webView)
+            webView.removeFromSuperview()
+        }
+    }
+}
+
+// SwiftUI wrapper for background WKWebView scraping
+struct BackgroundWebViewLoader: UIViewRepresentable {
+    let url: URL
+    let scheduledTime: Date
+    let onResult: (Date?, String?) -> Void
+    func makeCoordinator() -> Coordinator {
+        Coordinator(scheduledTime: scheduledTime, onResult: onResult)
+    }
+    func makeUIView(context: Context) -> WKWebView {
+        let webView = WKWebView(frame: CGRect(x: -1000, y: -1000, width: 1, height: 1))
+        webView.navigationDelegate = context.coordinator
+        // Set a realistic iPhone Safari user agent
+        webView.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+        webView.load(URLRequest(url: url))
+        return webView
+    }
+    func updateUIView(_ uiView: WKWebView, context: Context) {}
+    class Coordinator: NSObject, WKNavigationDelegate {
+        let scheduledTime: Date
+        let onResult: (Date?, String?) -> Void
+        init(scheduledTime: Date, onResult: @escaping (Date?, String?) -> Void) {
+            self.scheduledTime = scheduledTime
+            self.onResult = onResult
+        }
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                // Print the first 1000 chars of the HTML
+                webView.evaluateJavaScript("document.documentElement.outerHTML") { htmlResult, htmlError in
+                    if let html = htmlResult as? String {
+                        print("[DEBUG][WKWebView] HTML preview:\n" + html.prefix(1000))
+                    } else if let htmlError = htmlError {
+                        print("[DEBUG][WKWebView] HTML error: \(htmlError)")
+                    }
+                }
+                let js = """
+                (function() {
+                    function getText(node) {
+                        return node && node.innerText ? node.innerText.trim() : '';
+                    }
+                    var steps = Array.from(document.querySelectorAll('p')).filter(p => getText(p).toLowerCase().includes('collect your luggage'));
+                    if (steps.length === 0) return JSON.stringify({ time: null, carousel: null });
+                    var step = steps[0];
+                    var time = null;
+                    var node = step.parentElement;
+                    while (node && !time) {
+                        var prev = node.previousElementSibling;
+                        while (prev) {
+                            var txt = getText(prev);
+                            var match = txt.match(/\\d{2}:\\d{2}/);
+                            if (match) { time = match[0]; break; }
+                            prev = prev.previousElementSibling;
+                        }
+                        node = node.parentElement;
+                    }
+                    var carousel = null;
+                    node = step.parentElement;
+                    while (node && !carousel) {
+                        var next = node.nextElementSibling;
+                        while (next) {
+                            var txt = getText(next);
+                            var match = txt.match(/Carousel\\s*0*(\\d+)/i);
+                            if (match) { carousel = match[1]; break; }
+                            next = next.nextElementSibling;
+                        }
+                        node = node.parentElement;
+                    }
+                    return JSON.stringify({ time: time, carousel: carousel });
+                })();
+                """
+                webView.evaluateJavaScript(js) { result, error in
+                    if let error = error {
+                        print("[DEBUG][WKWebView] JS error: \(error)")
+                    }
+                    print("[DEBUG][WKWebView] JS raw result: \(String(describing: result))")
+                    var bagTime: Date? = nil
+                    var carousel: String? = nil
+                    if let jsonString = result as? String,
+                       let data = jsonString.data(using: .utf8),
+                       let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                        if let timeStr = dict["time"] as? String {
+                            let timeFormatter = DateFormatter()
+                            timeFormatter.dateFormat = "HH:mm"
+                            if let t = timeFormatter.date(from: timeStr) {
+                                let calendar = Calendar.current
+                                let hour = calendar.component(.hour, from: t)
+                                let minute = calendar.component(.minute, from: t)
+                                bagTime = calendar.date(bySettingHour: hour, minute: minute, second: 0, of: self.scheduledTime)
+                            }
+                        }
+                        carousel = dict["carousel"] as? String
+                        print("[DEBUG][WKWebView] Parsed bagTime: \(String(describing: bagTime)), carousel: \(String(describing: carousel))")
+                    }
+                    print("[DEBUG][WKWebView] Calling onResult with bagTime: \(String(describing: bagTime)), carousel: \(String(describing: carousel))")
+                    self.onResult(bagTime, carousel)
+                }
+            }
+        }
+    }
+}
+
+extension DateFormatter {
+    static func with(format: String) -> DateFormatter {
+        let df = DateFormatter()
+        df.dateFormat = format
+        return df
     }
 }
