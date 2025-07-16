@@ -1,0 +1,109 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model IncomingFlight {
+  id                String   @id @default(cuid())
+  flightNumber      String
+  terminal          String
+  origin            String
+  scheduledTime     DateTime
+  actualArrivalTime DateTime?
+  expectedArrivalTime DateTime?
+  cancelled         Boolean  @default(false)
+  collectedTime     DateTime?
+  deliveredTime     DateTime?
+  screeningStartTime DateTime?
+  screeningEndTime  DateTime?
+  screeningBags     Int?
+  bagAvailableTime  DateTime?
+  carousel          String?
+  notes             String   @default("")
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  // Relations
+  outgoingLinks     OutgoingLink[]
+
+  @@map("incoming_flights")
+}
+
+model OutgoingFlight {
+  id                String   @id @default(cuid())
+  flightNumber      String
+  terminal          String
+  destination       String
+  scheduledTime     DateTime
+  actualTime        DateTime?
+  expectedTime      DateTime?
+  cancelled         Boolean  @default(false)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  // Relations
+  incomingLinks     OutgoingLink[]
+  bagsFromIncoming  BagAssignment[]
+
+  @@map("outgoing_flights")
+}
+
+model OutgoingLink {
+  id                String   @id @default(cuid())
+  incomingFlightId  String
+  outgoingFlightId  String
+  bagCount          Int      @default(0)
+  isMAGTransfer     Boolean  @default(false)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  // Relations
+  incomingFlight    IncomingFlight @relation(fields: [incomingFlightId], references: [id], onDelete: Cascade)
+  outgoingFlight    OutgoingFlight @relation(fields: [outgoingFlightId], references: [id], onDelete: Cascade)
+
+  @@unique([incomingFlightId, outgoingFlightId])
+  @@map("outgoing_links")
+}
+
+model BagAssignment {
+  id                String   @id @default(cuid())
+  outgoingFlightId  String
+  incomingFlightNumber String
+  bagCount          Int
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  // Relations
+  outgoingFlight    OutgoingFlight @relation(fields: [outgoingFlightId], references: [id], onDelete: Cascade)
+
+  @@unique([outgoingFlightId, incomingFlightNumber])
+  @@map("bag_assignments")
+}
+
+model User {
+  id                String   @id @default(cuid())
+  email             String   @unique
+  passwordHash      String
+  name              String
+  role              UserRole @default(OPERATOR)
+  terminal          String?
+  isActive          Boolean  @default(true)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@map("users")
+}
+
+enum UserRole {
+  ADMIN
+  MANAGER
+  OPERATOR
+  VIEWER
+} 

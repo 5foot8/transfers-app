@@ -1,0 +1,21 @@
+{
+  "name": "flight-transfers-web",
+  "version": "1.0.0",
+  "description": "Web version of Flight Transfers app with API for iOS integration",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "dev:backend": "cd backend && npm run dev",
+    "dev:frontend": "cd frontend && npm run dev",
+    "build": "npm run build:backend && npm run build:frontend",
+    "build:backend": "cd backend && npm run build",
+    "build:frontend": "cd frontend && npm run build",
+    "start": "cd backend && npm start",
+    "install:all": "npm install && cd backend && npm install && cd ../frontend && npm install"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  },
+  "keywords": ["flight", "transfers", "airport", "logistics"],
+  "author": "Your Name",
+  "license": "MIT"
+} 
