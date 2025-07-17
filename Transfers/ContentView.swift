@@ -1,6 +1,6 @@
 import SwiftUI
 import PDFKit
-internal import Combine
+import Combine
 import WebKit
 
 func today() -> Date {

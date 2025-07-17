@@ -22,8 +22,6 @@ class FirebaseSync: ObservableObject {
     @Published var lastSyncTime: Date? = nil
     @Published var sessionID: String? = nil
     
-    private var cancellables = Set<AnyCancellable>()
-    
     private init() {
         // Load saved sync mode
         if let savedMode = UserDefaults.standard.string(forKey: "syncMode"),
@@ -57,7 +55,7 @@ class FirebaseSync: ObservableObject {
                 
                 if syncMode == .live {
                     // Generate or join session
-                    await setupLiveSession()
+                    setupLiveSession()
                 }
             } catch {
                 print("Firebase auth failed: \(error)")
@@ -66,7 +64,7 @@ class FirebaseSync: ObservableObject {
         }
     }
     
-    private func setupLiveSession() async {
+    private func setupLiveSession() {
         // Generate a unique session ID
         sessionID = UUID().uuidString
         UserDefaults.standard.set(sessionID, forKey: "sessionID")
