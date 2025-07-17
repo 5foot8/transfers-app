@@ -139,45 +139,11 @@ struct ContentView: View {
             )
         }
         .sheet(isPresented: $showingWebImport) {
-            ArrivalsImportSheet(
+            EnhancedImportSheet(
                 arrivalsImportList: $arrivalsImportList,
                 departuresImportList: $departuresImportList,
-                selectedDeparture: $selectedDeparture,
-                bagCountsForPanel: $bagCountsForPanel,
                 allArrivals: incomingFlights,
-                onSaveDepartureBags: { departure, bagCounts in
-                    var outgoing = departure
-                    
-                    // First, add or update the outgoing flight
-                    outgoingFlights.updateOrAppend(outgoing)
-                    
-                    // Get the final outgoing flight (with updated ID if it was appended)
-                    let finalOutgoing = outgoingFlights.find(outgoing) ?? outgoing
-                    
-                    // Now create the links from incoming flights to this outgoing flight
-                    for (arrivalID, count) in bagCounts where count > 0 {
-                        // Find the arrival by UUID
-                        if let arrivalIndex = incomingFlights.firstIndex(where: { $0.id == arrivalID }) {
-                            var arrival = incomingFlights[arrivalIndex]
-                            
-                            // Add the outgoing link if it doesn't exist
-                            if !arrival.outgoingLinks.contains(where: { $0.outgoingFlightID == finalOutgoing.id }) {
-                                arrival.outgoingLinks.append(OutgoingLink(outgoingFlightID: finalOutgoing.id, bagCount: count))
-                            }
-                            
-                            // Update the arrival flight
-                            incomingFlights[arrivalIndex] = arrival
-                            
-                            // Update the bagsFromIncoming dictionary
-                            outgoing.bagsFromIncoming[arrival.flightNumber] = count
-                        }
-                    }
-                    
-                    // Update the outgoing flight with the bag counts
-                    if let outgoingIndex = outgoingFlights.firstIndex(where: { $0.id == finalOutgoing.id }) {
-                        outgoingFlights[outgoingIndex].bagsFromIncoming = outgoing.bagsFromIncoming
-                    }
-                },
+                allDepartures: outgoingFlights,
                 onDone: {
                     for flight in arrivalsImportList {
                         incomingFlights.updateOrAppend(flight)
@@ -1343,75 +1309,153 @@ struct LiveFlightRowView: View {
     }
 } 
 
-// Add a new UIViewControllerRepresentable for the web import
-struct ManchesterWebImportView: UIViewControllerRepresentable {
+// Enhanced Web Import System
+struct EnhancedWebImportView: UIViewControllerRepresentable {
     let url: URL
-    var onFlightImported: (IncomingFlight) -> Void
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(onFlightImported: onFlightImported)
+    let existingFlights: [String] // Flight numbers already in database
+    var onFlightSelected: (FlightData) -> Void
+    var onFlightDeselected: (FlightData) -> Void
+    
+    struct FlightData: Hashable {
+        let flightNumber: String
+        let time: String
+        let origin: String
+        let terminal: String
+        let airline: String
+        let status: String
+        let isArrival: Bool
     }
-
+    
+    func makeCoordinator() -> Coordinator {
+        Coordinator(
+            existingFlights: existingFlights,
+            onFlightSelected: onFlightSelected,
+            onFlightDeselected: onFlightDeselected
+        )
+    }
+    
     func makeUIViewController(context: Context) -> UIViewController {
         let webView = WKWebView()
         webView.navigationDelegate = context.coordinator
+        
         let js = """
         (function() {
-          // Add CSS for hover highlight
-          var style = document.createElement('style');
-          style.innerHTML = '.__flight_hover { background: #ffe066 !important; cursor: pointer !important; }';
-          document.head.appendChild(style);
-
-          function extractAndSend(row) {
-            const schedTime = row.querySelector('span[style*=\"width: 80px\"]')?.innerText;
-            const origin = row.querySelector('span[class*=\"ss8qoa8\"]')?.innerText;
-            const flightNumber = row.querySelector('span[class*=\"vwba0x\"]')?.innerText;
-            const airline = row.querySelector('span[class*=\"w6c5ku\"]')?.innerText;
-            const terminal = row.querySelector('td:nth-child(3)')?.innerText;
-            const status = row.querySelector('td:last-child')?.innerText;
-            const flightData = {
-              scheduled_time: schedTime,
-              origin: origin,
-              flight_number: flightNumber,
-              airline: airline,
-              terminal: terminal,
-              status: status
-            };
-            window.webkit?.messageHandlers?.flightData?.postMessage(flightData);
-          }
-
-          function attachHandlers() {
-            document.querySelectorAll('tr').forEach(row => {
-              if (!row.__hasFlightHandler) {
-                row.addEventListener('mouseenter', function() {
-                  row.classList.add('__flight_hover');
+            // Enhanced CSS for different states
+            var style = document.createElement('style');
+            style.innerHTML = `
+                .__flight_hover { background: #ffe066 !important; cursor: pointer !important; }
+                .__flight_selected { background: #4CAF50 !important; color: white !important; }
+                .__flight_existing { background: #FF9800 !important; color: white !important; }
+                .__flight_selected.__flight_existing { background: #FF5722 !important; color: white !important; }
+            `;
+            document.head.appendChild(style);
+            
+            var selectedFlights = new Set();
+            var existingFlights = \(existingFlights);
+            
+            function getFlightKey(row) {
+                const flightNumber = row.querySelector('span[class*="vwba0x"]')?.innerText?.trim();
+                const time = row.querySelector('span[style*="width: 80px"]')?.innerText?.trim();
+                const terminal = row.querySelector('td:nth-child(3)')?.innerText?.trim();
+                return flightNumber + '|' + time + '|' + terminal;
+            }
+            
+            function updateRowStyle(row) {
+                const key = getFlightKey(row);
+                const isSelected = selectedFlights.has(key);
+                const isExisting = existingFlights.includes(row.querySelector('span[class*="vwba0x"]')?.innerText?.trim());
+                
+                row.classList.remove('__flight_hover', '__flight_selected', '__flight_existing');
+                
+                if (isSelected && isExisting) {
+                    row.classList.add('__flight_selected', '__flight_existing');
+                } else if (isSelected) {
+                    row.classList.add('__flight_selected');
+                } else if (isExisting) {
+                    row.classList.add('__flight_existing');
+                }
+            }
+            
+            function extractFlightData(row) {
+                const schedTime = row.querySelector('span[style*="width: 80px"]')?.innerText?.trim();
+                const origin = row.querySelector('span[class*="ss8qoa8"]')?.innerText?.trim();
+                const flightNumber = row.querySelector('span[class*="vwba0x"]')?.innerText?.trim();
+                const airline = row.querySelector('span[class*="w6c5ku"]')?.innerText?.trim();
+                const terminal = row.querySelector('td:nth-child(3)')?.innerText?.trim();
+                const status = row.querySelector('td:last-child')?.innerText?.trim();
+                
+                return {
+                    flight_number: flightNumber,
+                    scheduled_time: schedTime,
+                    origin: origin,
+                    airline: airline,
+                    terminal: terminal,
+                    status: status,
+                    is_arrival: true
+                };
+            }
+            
+            function toggleFlightSelection(row) {
+                const flightNumber = row.querySelector('span[class*="vwba0x"]')?.innerText?.trim();
+                if (!flightNumber || flightNumber === '') return;
+                
+                const key = getFlightKey(row);
+                const flightData = extractFlightData(row);
+                
+                if (selectedFlights.has(key)) {
+                    selectedFlights.delete(key);
+                    window.webkit?.messageHandlers?.flightDeselected?.postMessage(flightData);
+                } else {
+                    selectedFlights.add(key);
+                    window.webkit?.messageHandlers?.flightSelected?.postMessage(flightData);
+                }
+                
+                updateRowStyle(row);
+            }
+            
+            function attachHandlers() {
+                document.querySelectorAll('tr').forEach(row => {
+                    if (!row.__hasEnhancedHandler) {
+                        const flightNumber = row.querySelector('span[class*="vwba0x"]')?.innerText?.trim();
+                        if (flightNumber && flightNumber !== '') {
+                            row.addEventListener('mouseenter', function() {
+                                if (!this.classList.contains('__flight_selected') && !this.classList.contains('__flight_existing')) {
+                                    this.classList.add('__flight_hover');
+                                }
+                            });
+                            
+                            row.addEventListener('mouseleave', function() {
+                                this.classList.remove('__flight_hover');
+                            });
+                            
+                            row.addEventListener('click', function(event) {
+                                event.stopPropagation();
+                                event.preventDefault();
+                                toggleFlightSelection(this);
+                            }, true);
+                            
+                            // Set initial style for existing flights
+                            updateRowStyle(row);
+                        }
+                        row.__hasEnhancedHandler = true;
+                    }
                 });
-                row.addEventListener('mouseleave', function() {
-                  row.classList.remove('__flight_hover');
-                });
-                row.addEventListener('click', function(event) {
-                  const flightNumber = row.querySelector('span[class*=\"vwba0x\"]')?.innerText;
-                  if (!flightNumber || flightNumber.trim() === '') return; // Let site handle navigation rows
-                  event.stopPropagation();
-                  event.preventDefault();
-                  extractAndSend(row);
-                }, true);
-                row.__hasFlightHandler = true;
-              }
-            });
-          }
-
-          // Initial attach
-          attachHandlers();
-
-          // Observe for new rows
-          const observer = new MutationObserver(attachHandlers);
-          observer.observe(document.body, { childList: true, subtree: true });
+            }
+            
+            // Initial attach
+            attachHandlers();
+            
+            // Observe for new rows
+            const observer = new MutationObserver(attachHandlers);
+            observer.observe(document.body, { childList: true, subtree: true });
         })();
         """
+        
         let userScript = WKUserScript(source: js, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
         webView.configuration.userContentController.addUserScript(userScript)
-        webView.configuration.userContentController.add(context.coordinator, name: "flightData")
+        webView.configuration.userContentController.add(context.coordinator, name: "flightSelected")
+        webView.configuration.userContentController.add(context.coordinator, name: "flightDeselected")
+        
         let vc = UIViewController()
         webView.frame = vc.view.bounds
         webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -1420,360 +1464,359 @@ struct ManchesterWebImportView: UIViewControllerRepresentable {
         context.coordinator.webView = webView
         return vc
     }
-
+    
     func updateUIViewController(_ uiViewController: UIViewController, context: Context) {}
-
+    
     class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
-        var onFlightImported: (IncomingFlight) -> Void
+        let existingFlights: [String]
+        let onFlightSelected: (FlightData) -> Void
+        let onFlightDeselected: (FlightData) -> Void
         weak var webView: WKWebView?
-
-        init(onFlightImported: @escaping (IncomingFlight) -> Void) {
-            self.onFlightImported = onFlightImported
+        
+        init(existingFlights: [String], onFlightSelected: @escaping (FlightData) -> Void, onFlightDeselected: @escaping (FlightData) -> Void) {
+            self.existingFlights = existingFlights
+            self.onFlightSelected = onFlightSelected
+            self.onFlightDeselected = onFlightDeselected
         }
-
+        
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-            if message.name == "flightData", let dict = message.body as? [String: Any] {
-                let flight = IncomingFlight(
+            if let dict = message.body as? [String: Any] {
+                let flightData = FlightData(
                     flightNumber: dict["flight_number"] as? String ?? "",
-                    terminal: dict["terminal"] as? String ?? "",
+                    time: dict["scheduled_time"] as? String ?? "",
                     origin: dict["origin"] as? String ?? "",
-                    scheduledTime: parseTime(dict["scheduled_time"] as? String),
-                    notes: "",
-                    date: today()
+                    terminal: dict["terminal"] as? String ?? "",
+                    airline: dict["airline"] as? String ?? "",
+                    status: dict["status"] as? String ?? "",
+                    isArrival: dict["is_arrival"] as? Bool ?? true
                 )
-                onFlightImported(flight)
+                
+                if message.name == "flightSelected" {
+                    onFlightSelected(flightData)
+                } else if message.name == "flightDeselected" {
+                    onFlightDeselected(flightData)
+                }
             }
-        }
-
-        func parseTime(_ timeString: String?) -> Date {
-            guard let timeString = timeString else { return Date() }
-            let formatter = DateFormatter()
-            formatter.dateFormat = "HH:mm"
-            let today = Calendar.current.startOfDay(for: Date())
-            if let time = formatter.date(from: timeString) {
-                let calendar = Calendar.current
-                let hour = calendar.component(.hour, from: time)
-                let minute = calendar.component(.minute, from: time)
-                return calendar.date(bySettingHour: hour, minute: minute, second: 0, of: today) ?? today
-            }
-            return today
         }
     }
-} 
+}
 
-// Import Sheet with TabView (Arrivals and Departures)
-struct ArrivalsImportSheet: View {
+// Enhanced Import Sheet with combined arrivals/departures
+struct EnhancedImportSheet: View {
     @Binding var arrivalsImportList: [IncomingFlight]
     @Binding var departuresImportList: [OutgoingFlight]
-    @Binding var selectedDeparture: OutgoingFlight?
-    @Binding var bagCountsForPanel: [UUID: Int]
     var allArrivals: [IncomingFlight]
-    var onSaveDepartureBags: (OutgoingFlight, [UUID: Int]) -> Void
+    var allDepartures: [OutgoingFlight]
     var onDone: () -> Void
+    
     @State private var selectedTab = 0
+    @State private var selectedFlights: Set<String> = []
+    @State private var showingDepartures = false
+    
+    var existingFlightNumbers: [String] {
+        let arrivalNumbers = allArrivals.map { $0.flightNumber }
+        let departureNumbers = allDepartures.map { $0.flightNumber }
+        return Array(Set(arrivalNumbers + departureNumbers))
+    }
+    
     var body: some View {
         NavigationView {
-            ZStack(alignment: .bottom) {
-                VStack(spacing: 0) {
-                    Picker("Import Type", selection: $selectedTab) {
-                        Text("Arrivals").tag(0)
-                        Text("Departures").tag(1)
-                    }
-                    .pickerStyle(SegmentedPickerStyle())
-                    .padding([.top, .horizontal])
-                    Divider()
-                    if selectedTab == 0 {
-                        ArrivalsWebImportView(arrivalsImportList: $arrivalsImportList)
-                    } else {
-                        DeparturesWebImportView(
-                            departuresImportList: $departuresImportList
-                        )
-                    }
-                    Divider()
-                    VStack(alignment: .leading) {
-                        Text("Selected Arrivals:")
-                            .font(.headline)
-                            .padding(.top, 8)
-                        if arrivalsImportList.isEmpty {
-                            Text("No arrivals selected yet.")
-                                .foregroundColor(.secondary)
-                                .padding(.vertical, 8)
-                        } else {
-                            List {
-                                ForEach(arrivalsImportList, id: \ .id) { flight in
-                                    HStack {
-                                        VStack(alignment: .leading) {
-                                            HStack(spacing: 4) {
-                                                Text(flight.flightNumber)
-                                                Text(flight.terminal.uppercased())
-                                                    .font(.subheadline).bold()
-                                                    .foregroundColor(terminalColor(flight.terminal))
-                                            }
-                                            Text(flight.origin)
-                                                .font(.caption)
-                                                .foregroundColor(.secondary)
-                                            Text(flight.scheduledTime, style: .time)
-                                                .font(.caption2)
-                                        }
-                                        Spacer()
-                                        Button(action: {
-                                            if let idx = arrivalsImportList.firstIndex(of: flight) {
-                                                arrivalsImportList.remove(at: idx)
-                                            }
-                                        }) {
-                                            Image(systemName: "xmark.circle.fill").foregroundColor(.red)
-                                        }
-                                    }
-                                }
+            VStack(spacing: 0) {
+                // Tab selector
+                Picker("Import Type", selection: $selectedTab) {
+                    Text("Arrivals").tag(0)
+                    Text("Departures").tag(1)
+                }
+                .pickerStyle(SegmentedPickerStyle())
+                .padding([.top, .horizontal])
+                
+                Divider()
+                
+                // Web view
+                if selectedTab == 0 {
+                    EnhancedWebImportView(
+                        url: URL(string: "https://www.manchesterairport.co.uk/flight-information/arrivals/")!,
+                        existingFlights: existingFlightNumbers,
+                        onFlightSelected: { flightData in
+                            let flight = IncomingFlight(
+                                flightNumber: flightData.flightNumber,
+                                terminal: flightData.terminal,
+                                origin: flightData.origin,
+                                scheduledTime: parseTime(flightData.time),
+                                notes: "",
+                                date: today()
+                            )
+                            if !arrivalsImportList.contains(where: { $0.flightNumber == flight.flightNumber && $0.terminal == flight.terminal && abs($0.scheduledTime.timeIntervalSince(flight.scheduledTime)) < 60 }) {
+                                arrivalsImportList.append(flight)
                             }
-                            .frame(maxHeight: 200)
-                        }
-                    }
-                    .padding(.horizontal)
-                    VStack(alignment: .leading) {
-                        Text("Selected Departures:")
-                            .font(.headline)
-                            .padding(.top, 8)
-                        if departuresImportList.isEmpty {
-                            Text("No departures selected yet.")
-                                .foregroundColor(.secondary)
-                                .padding(.vertical, 8)
-                        } else {
-                            List {
-                                ForEach(departuresImportList, id: \ .id) { flight in
-                                    HStack {
-                                        VStack(alignment: .leading) {
-                                            HStack(spacing: 4) {
-                                                Text(flight.flightNumber)
-                                                Text(flight.terminal.uppercased())
-                                                    .font(.subheadline).bold()
-                                                    .foregroundColor(terminalColor(flight.terminal))
-                                            }
-                                            Text(flight.destination)
-                                                .font(.caption)
-                                                .foregroundColor(.secondary)
-                                            Text(flight.scheduledTime, style: .time)
-                                                .font(.caption2)
-                                        }
-                                        Spacer()
-                                        Button(action: {
-                                            if let idx = departuresImportList.firstIndex(of: flight) {
-                                                departuresImportList.remove(at: idx)
-                                            }
-                                        }) {
-                                            Image(systemName: "xmark.circle.fill").foregroundColor(.red)
-                                        }
-                                    }
-                                }
+                        },
+                        onFlightDeselected: { flightData in
+                            arrivalsImportList.removeAll { flight in
+                                flight.flightNumber == flightData.flightNumber && 
+                                flight.terminal == flightData.terminal &&
+                                abs(flight.scheduledTime.timeIntervalSince(parseTime(flightData.time))) < 60
                             }
-                            .frame(maxHeight: 200)
                         }
-                    }
-                    .padding(.horizontal)
-                    Spacer()
-                    Button("Done") {
-                        onDone()
-                    }
-                    .font(.headline)
-                    .padding()
-                }
-                .navigationTitle("Import Flights")
-                .navigationBarTitleDisplayMode(.inline)
-            }
-        }
-    }
-}
-
-// Arrivals Web Import View (wraps ManchesterWebImportView)
-struct ArrivalsWebImportView: View {
-    @Binding var arrivalsImportList: [IncomingFlight]
-    var body: some View {
-        ManchesterWebImportView(
-            url: URL(string: "https://www.manchesterairport.co.uk/flight-information/arrivals/")!,
-            onFlightImported: { flight in
-                // Only add if not already in the list (by flight number, terminal, and scheduled time)
-                if !arrivalsImportList.contains(where: { $0.flightNumber == flight.flightNumber && $0.terminal == flight.terminal && abs($0.scheduledTime.timeIntervalSince(flight.scheduledTime)) < 60 }) {
-                    arrivalsImportList.append(flight)
-                }
-            }
-        )
-    }
-}
-
-// Departures Web Import View
-struct DeparturesWebImportView: View {
-    @Binding var departuresImportList: [OutgoingFlight]
-    var body: some View {
-        ManchesterDeparturesWebImportView(
-            onFlightImported: { flight in
-                // Only add if not already in the list (by flight number, terminal, and scheduled time)
-                if !departuresImportList.contains(where: { $0.flightNumber == flight.flightNumber && $0.terminal == flight.terminal && abs($0.scheduledTime.timeIntervalSince(flight.scheduledTime)) < 60 }) {
-                    departuresImportList.append(flight)
-                }
-            },
-            selectedDeparture: nil
-        )
-    }
-}
-
-// Bottom panel for bag entry
-struct DepartureBagPanel: View {
-    let departure: OutgoingFlight
-    let arrivals: [IncomingFlight]
-    @Binding var bagCounts: [UUID: Int] // Use flightNumber as key
-    var onSave: () -> Void
-    var onCancel: () -> Void
-    var body: some View {
-        VStack(spacing: 0) {
-            Capsule().frame(width: 40, height: 6).foregroundColor(.gray.opacity(0.3)).padding(.top, 8)
-            HStack {
-                VStack(alignment: .leading) {
-                    HStack(spacing: 4) {
-                        Text("Departure: ")
-                        Text(departure.flightNumber).bold()
-                        Text(departure.terminal.uppercased())
-                            .font(.subheadline).bold()
-                            .foregroundColor(terminalColor(departure.terminal))
-                    }
-                    Text(departure.destination)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    Text(departure.scheduledTime, style: .time)
-                        .font(.caption2)
-                }
-                Spacer()
-                Button(action: onCancel) {
-                    Image(systemName: "xmark.circle.fill").font(.title2).foregroundColor(.gray)
-                }
-            }
-            .padding(.horizontal)
-            Divider()
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Bags from Arrivals:").font(.headline)
-                if arrivals.isEmpty {
-                    Text("No arrivals available to transfer from.")
-                        .foregroundColor(.secondary)
-                        .padding(.vertical, 16)
-                        .frame(maxWidth: .infinity, alignment: .center)
+                    )
                 } else {
-                    ScrollView {
-                        VStack(spacing: 8) {
-                            ForEach(arrivals.sorted(by: { $0.scheduledTime < $1.scheduledTime }), id: \ .id) { arrival in
-                                HStack(spacing: 8) {
-                                    Text(arrival.flightNumber)
-                                        .font(.subheadline).bold()
-                                    Text(arrival.terminal.uppercased())
-                                        .font(.subheadline).bold()
-                                        .foregroundColor(terminalColor(arrival.terminal))
-                                    Text(arrival.scheduledTime, style: .time)
-                                        .font(.caption)
-                                    Spacer()
-                                    Stepper(value: Binding(
-                                        get: { bagCounts[arrival.id] ?? 0 },
-                                        set: { bagCounts[arrival.id] = $0 }
-                                    ), in: 0...999) {
-                                        Text("\(bagCounts[arrival.id] ?? 0)")
-                                            .frame(width: 32)
-                                    }
-                                }
+                    EnhancedDeparturesWebImportView(
+                        existingFlights: existingFlightNumbers,
+                        onFlightSelected: { flightData in
+                            let flight = OutgoingFlight(
+                                flightNumber: flightData.flightNumber,
+                                terminal: flightData.terminal,
+                                destination: flightData.origin, // Note: origin field contains destination for departures
+                                scheduledTime: parseTime(flightData.time),
+                                notes: "",
+                                date: today()
+                            )
+                            if !departuresImportList.contains(where: { $0.flightNumber == flight.flightNumber && $0.terminal == flight.terminal && abs($0.scheduledTime.timeIntervalSince(flight.scheduledTime)) < 60 }) {
+                                departuresImportList.append(flight)
+                            }
+                        },
+                        onFlightDeselected: { flightData in
+                            departuresImportList.removeAll { flight in
+                                flight.flightNumber == flightData.flightNumber && 
+                                flight.terminal == flightData.terminal &&
+                                abs(flight.scheduledTime.timeIntervalSince(parseTime(flightData.time))) < 60
                             }
                         }
-                        .padding(.vertical, 4)
-                    }
-                    .frame(minHeight: 120, maxHeight: 260)
+                    )
                 }
+                
+                Divider()
+                
+                // Selected flights list at bottom
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Selected Flights")
+                            .font(.headline)
+                        Spacer()
+                        Text("\(arrivalsImportList.count + departuresImportList.count) total")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.horizontal)
+                    
+                    ScrollView {
+                        LazyVStack(spacing: 4) {
+                            ForEach(arrivalsImportList, id: \.id) { flight in
+                                HStack {
+                                    Text("🛬 \(flight.flightNumber)")
+                                        .font(.subheadline)
+                                        .bold()
+                                    Text(flight.terminal.uppercased())
+                                        .font(.caption)
+                                        .foregroundColor(terminalColor(flight.terminal))
+                                    Text(flight.scheduledTime, style: .time)
+                                        .font(.caption)
+                                    Text(flight.origin)
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                    Spacer()
+                                }
+                                .padding(.horizontal)
+                                .padding(.vertical, 2)
+                                .background(Color.green.opacity(0.1))
+                                .cornerRadius(4)
+                            }
+                            
+                            ForEach(departuresImportList, id: \.id) { flight in
+                                HStack {
+                                    Text("🛫 \(flight.flightNumber)")
+                                        .font(.subheadline)
+                                        .bold()
+                                    Text(flight.terminal.uppercased())
+                                        .font(.caption)
+                                        .foregroundColor(terminalColor(flight.terminal))
+                                    Text(flight.scheduledTime, style: .time)
+                                        .font(.caption)
+                                    Text(flight.destination)
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                    Spacer()
+                                }
+                                .padding(.horizontal)
+                                .padding(.vertical, 2)
+                                .background(Color.blue.opacity(0.1))
+                                .cornerRadius(4)
+                            }
+                        }
+                        .padding(.horizontal)
+                    }
+                    .frame(maxHeight: 150)
+                }
+                .padding(.vertical, 8)
+                
+                // Done button
+                Button("Import Selected Flights (\(arrivalsImportList.count + departuresImportList.count))") {
+                    onDone()
+                }
+                .font(.headline)
+                .padding()
+                .frame(maxWidth: .infinity)
+                .background(Color.blue)
+                .foregroundColor(.white)
+                .cornerRadius(12)
+                .padding(.horizontal)
+                .padding(.bottom, 8)
+                .disabled(arrivalsImportList.isEmpty && departuresImportList.isEmpty)
             }
-            .padding(.horizontal)
-            .padding(.bottom, 8)
-            .animation(.default, value: arrivals.count)
-            Button("Save") {
-                onSave()
-            }
-            .font(.headline)
-            .frame(maxWidth: .infinity)
-            .padding()
-            .background(Color.blue)
-            .foregroundColor(.white)
-            .cornerRadius(12)
-            .padding(.horizontal)
-            .padding(.bottom, 8)
+            .navigationTitle("Import Flights")
+            .navigationBarTitleDisplayMode(.inline)
         }
-        .background(Color(.systemBackground).shadow(radius: 8))
-        .cornerRadius(16)
-        .padding(.horizontal)
-        .padding(.bottom, 8)
+    }
+    
+    private func parseTime(_ timeString: String) -> Date {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        let today = Calendar.current.startOfDay(for: Date())
+        if let time = formatter.date(from: timeString) {
+            let calendar = Calendar.current
+            let hour = calendar.component(.hour, from: time)
+            let minute = calendar.component(.minute, from: time)
+            return calendar.date(bySettingHour: hour, minute: minute, second: 0, of: today) ?? today
+        }
+        return today
     }
 }
 
-// Manchester Departures Web Import View (like ManchesterWebImportView but for departures)
-struct ManchesterDeparturesWebImportView: UIViewControllerRepresentable {
-    var onFlightImported: (OutgoingFlight) -> Void
-    var selectedDeparture: OutgoingFlight?
-
+// Enhanced Departures Web Import View
+struct EnhancedDeparturesWebImportView: UIViewControllerRepresentable {
+    let existingFlights: [String]
+    var onFlightSelected: (EnhancedWebImportView.FlightData) -> Void
+    var onFlightDeselected: (EnhancedWebImportView.FlightData) -> Void
+    
     func makeCoordinator() -> Coordinator {
-        Coordinator(onFlightImported: onFlightImported)
+        Coordinator(
+            existingFlights: existingFlights,
+            onFlightSelected: onFlightSelected,
+            onFlightDeselected: onFlightDeselected
+        )
     }
-
+    
     func makeUIViewController(context: Context) -> UIViewController {
         let webView = WKWebView()
         webView.navigationDelegate = context.coordinator
+        
         let js = """
         (function() {
-          // Add CSS for hover highlight (blue for departures)
-          var style = document.createElement('style');
-          style.innerHTML = '.__flight_hover_departure { background: #cce3ff !important; cursor: pointer !important; }';
-          document.head.appendChild(style);
-
-          function extractAndSend(row) {
-            const schedTime = row.querySelector('span[style*=\"width: 80px\"]')?.innerText;
-            const destination = row.querySelector('span[class*=\"ss8qoa8\"]')?.innerText;
-            const flightNumber = row.querySelector('span[class*=\"vwba0x\"]')?.innerText;
-            const airline = row.querySelector('span[class*=\"w6c5ku\"]')?.innerText;
-            const terminal = row.querySelector('td:nth-child(3)')?.innerText;
-            const status = row.querySelector('td:last-child')?.innerText;
-            const flightData = {
-              scheduled_time: schedTime,
-              destination: destination,
-              flight_number: flightNumber,
-              airline: airline,
-              terminal: terminal,
-              status: status
-            };
-            window.webkit?.messageHandlers?.flightData?.postMessage(flightData);
-          }
-
-          function attachHandlers() {
-            document.querySelectorAll('tr').forEach(row => {
-              if (!row.__hasFlightHandlerDeparture) {
-                row.addEventListener('mouseenter', function() {
-                  row.classList.add('__flight_hover_departure');
+            // Enhanced CSS for departures
+            var style = document.createElement('style');
+            style.innerHTML = `
+                .__flight_hover { background: #cce3ff !important; cursor: pointer !important; }
+                .__flight_selected { background: #4CAF50 !important; color: white !important; }
+                .__flight_existing { background: #FF9800 !important; color: white !important; }
+                .__flight_selected.__flight_existing { background: #FF5722 !important; color: white !important; }
+            `;
+            document.head.appendChild(style);
+            
+            var selectedFlights = new Set();
+            var existingFlights = \(existingFlights);
+            
+            function getFlightKey(row) {
+                const flightNumber = row.querySelector('span[class*="vwba0x"]')?.innerText?.trim();
+                const time = row.querySelector('span[style*="width: 80px"]')?.innerText?.trim();
+                const terminal = row.querySelector('td:nth-child(3)')?.innerText?.trim();
+                return flightNumber + '|' + time + '|' + terminal;
+            }
+            
+            function updateRowStyle(row) {
+                const key = getFlightKey(row);
+                const isSelected = selectedFlights.has(key);
+                const isExisting = existingFlights.includes(row.querySelector('span[class*="vwba0x"]')?.innerText?.trim());
+                
+                row.classList.remove('__flight_hover', '__flight_selected', '__flight_existing');
+                
+                if (isSelected && isExisting) {
+                    row.classList.add('__flight_selected', '__flight_existing');
+                } else if (isSelected) {
+                    row.classList.add('__flight_selected');
+                } else if (isExisting) {
+                    row.classList.add('__flight_existing');
+                }
+            }
+            
+            function extractFlightData(row) {
+                const schedTime = row.querySelector('span[style*="width: 80px"]')?.innerText?.trim();
+                const destination = row.querySelector('span[class*="ss8qoa8"]')?.innerText?.trim();
+                const flightNumber = row.querySelector('span[class*="vwba0x"]')?.innerText?.trim();
+                const airline = row.querySelector('span[class*="w6c5ku"]')?.innerText?.trim();
+                const terminal = row.querySelector('td:nth-child(3)')?.innerText?.trim();
+                const status = row.querySelector('td:last-child')?.innerText?.trim();
+                
+                return {
+                    flight_number: flightNumber,
+                    scheduled_time: schedTime,
+                    origin: destination, // Note: origin field contains destination for departures
+                    airline: airline,
+                    terminal: terminal,
+                    status: status,
+                    is_arrival: false
+                };
+            }
+            
+            function toggleFlightSelection(row) {
+                const flightNumber = row.querySelector('span[class*="vwba0x"]')?.innerText?.trim();
+                if (!flightNumber || flightNumber === '') return;
+                
+                const key = getFlightKey(row);
+                const flightData = extractFlightData(row);
+                
+                if (selectedFlights.has(key)) {
+                    selectedFlights.delete(key);
+                    window.webkit?.messageHandlers?.flightDeselected?.postMessage(flightData);
+                } else {
+                    selectedFlights.add(key);
+                    window.webkit?.messageHandlers?.flightSelected?.postMessage(flightData);
+                }
+                
+                updateRowStyle(row);
+            }
+            
+            function attachHandlers() {
+                document.querySelectorAll('tr').forEach(row => {
+                    if (!row.__hasEnhancedHandler) {
+                        const flightNumber = row.querySelector('span[class*="vwba0x"]')?.innerText?.trim();
+                        if (flightNumber && flightNumber !== '') {
+                            row.addEventListener('mouseenter', function() {
+                                if (!this.classList.contains('__flight_selected') && !this.classList.contains('__flight_existing')) {
+                                    this.classList.add('__flight_hover');
+                                }
+                            });
+                            
+                            row.addEventListener('mouseleave', function() {
+                                this.classList.remove('__flight_hover');
+                            });
+                            
+                            row.addEventListener('click', function(event) {
+                                event.stopPropagation();
+                                event.preventDefault();
+                                toggleFlightSelection(this);
+                            }, true);
+                            
+                            // Set initial style for existing flights
+                            updateRowStyle(row);
+                        }
+                        row.__hasEnhancedHandler = true;
+                    }
                 });
-                row.addEventListener('mouseleave', function() {
-                  row.classList.remove('__flight_hover_departure');
-                });
-                row.addEventListener('click', function(event) {
-                  const flightNumber = row.querySelector('span[class*=\"vwba0x\"]')?.innerText;
-                  if (!flightNumber || flightNumber.trim() === '') return; // Let site handle navigation rows
-                  event.stopPropagation();
-                  event.preventDefault();
-                  extractAndSend(row);
-                }, true);
-                row.__hasFlightHandlerDeparture = true;
-              }
-            });
-          }
-
-          // Initial attach
-          attachHandlers();
-
-          // Observe for new rows
-          const observer = new MutationObserver(attachHandlers);
-          observer.observe(document.body, { childList: true, subtree: true });
+            }
+            
+            // Initial attach
+            attachHandlers();
+            
+            // Observe for new rows
+            const observer = new MutationObserver(attachHandlers);
+            observer.observe(document.body, { childList: true, subtree: true });
         })();
         """
+        
         let userScript = WKUserScript(source: js, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
         webView.configuration.userContentController.addUserScript(userScript)
-        webView.configuration.userContentController.add(context.coordinator, name: "flightData")
+        webView.configuration.userContentController.add(context.coordinator, name: "flightSelected")
+        webView.configuration.userContentController.add(context.coordinator, name: "flightDeselected")
+        
         let vc = UIViewController()
         webView.frame = vc.view.bounds
         webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -1782,45 +1825,42 @@ struct ManchesterDeparturesWebImportView: UIViewControllerRepresentable {
         context.coordinator.webView = webView
         return vc
     }
-
+    
     func updateUIViewController(_ uiViewController: UIViewController, context: Context) {}
-
+    
     class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
-        var onFlightImported: (OutgoingFlight) -> Void
+        let existingFlights: [String]
+        let onFlightSelected: (EnhancedWebImportView.FlightData) -> Void
+        let onFlightDeselected: (EnhancedWebImportView.FlightData) -> Void
         weak var webView: WKWebView?
-
-        init(onFlightImported: @escaping (OutgoingFlight) -> Void) {
-            self.onFlightImported = onFlightImported
+        
+        init(existingFlights: [String], onFlightSelected: @escaping (EnhancedWebImportView.FlightData) -> Void, onFlightDeselected: @escaping (EnhancedWebImportView.FlightData) -> Void) {
+            self.existingFlights = existingFlights
+            self.onFlightSelected = onFlightSelected
+            self.onFlightDeselected = onFlightDeselected
         }
-
+        
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-            if message.name == "flightData", let dict = message.body as? [String: Any] {
-                let flight = OutgoingFlight(
+            if let dict = message.body as? [String: Any] {
+                let flightData = EnhancedWebImportView.FlightData(
                     flightNumber: dict["flight_number"] as? String ?? "",
+                    time: dict["scheduled_time"] as? String ?? "",
+                    origin: dict["origin"] as? String ?? "",
                     terminal: dict["terminal"] as? String ?? "",
-                    destination: dict["destination"] as? String ?? "",
-                    scheduledTime: parseTime(dict["scheduled_time"] as? String),
-                    actualTime: nil
+                    airline: dict["airline"] as? String ?? "",
+                    status: dict["status"] as? String ?? "",
+                    isArrival: dict["is_arrival"] as? Bool ?? false
                 )
-                onFlightImported(flight)
+                
+                if message.name == "flightSelected" {
+                    onFlightSelected(flightData)
+                } else if message.name == "flightDeselected" {
+                    onFlightDeselected(flightData)
+                }
             }
-        }
-
-        func parseTime(_ timeString: String?) -> Date {
-            guard let timeString = timeString else { return Date() }
-            let formatter = DateFormatter()
-            formatter.dateFormat = "HH:mm"
-            let today = Calendar.current.startOfDay(for: Date())
-            if let time = formatter.date(from: timeString) {
-                let calendar = Calendar.current
-                let hour = calendar.component(.hour, from: time)
-                let minute = calendar.component(.minute, from: time)
-                return calendar.date(bySettingHour: hour, minute: minute, second: 0, of: today) ?? today
-            }
-            return today
         }
     }
-} 
+}
 
 // Collapsible terminal section
 struct CollapsibleTerminalSection: View {

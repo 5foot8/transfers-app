@@ -1,6 +1,7 @@
 import Foundation
 import FirebaseFirestore
 import FirebaseAuth
+import FirebaseCore
 import SwiftUI
 import Combine
 
@@ -89,8 +90,8 @@ class FirebaseSync: ObservableObject {
         db.collection("sessions")
             .document(sessionID)
             .collection("incomingFlights")
-            .addSnapshotListener { [weak self] snapshot, error in
-                guard let self = self, let snapshot = snapshot else { return }
+            .addSnapshotListener { snapshot, error in
+                guard let snapshot = snapshot else { return }
                 
                 Task { @MainActor in
                     for change in snapshot.documentChanges {
@@ -115,8 +116,8 @@ class FirebaseSync: ObservableObject {
         db.collection("sessions")
             .document(sessionID)
             .collection("outgoingFlights")
-            .addSnapshotListener { [weak self] snapshot, error in
-                guard let self = self, let snapshot = snapshot else { return }
+            .addSnapshotListener { snapshot, error in
+                guard let snapshot = snapshot else { return }
                 
                 Task { @MainActor in
                     for change in snapshot.documentChanges {
