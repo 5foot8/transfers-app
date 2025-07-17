@@ -15,7 +15,7 @@ enum SyncMode: String, CaseIterable, Identifiable {
 @MainActor
 class FirebaseSync: ObservableObject {
     static let shared = FirebaseSync()
-    private let db = Firestore.firestore()
+    private let db: Firestore
     
     @Published var syncMode: SyncMode = .local
     @Published var isConnected: Bool = false
@@ -23,6 +23,15 @@ class FirebaseSync: ObservableObject {
     @Published var sessionID: String? = nil
     
     private init() {
+        // Initialize Firestore with error handling
+        if FirebaseApp.app() != nil {
+            self.db = Firestore.firestore()
+        } else {
+            // Fallback - this shouldn't happen if FirebaseApp.configure() is called
+            print("Warning: Firebase not configured, using default Firestore instance")
+            self.db = Firestore.firestore()
+        }
+        
         // Load saved sync mode
         if let savedMode = UserDefaults.standard.string(forKey: "syncMode"),
            let mode = SyncMode(rawValue: savedMode) {
