@@ -7,27 +7,19 @@ struct IncomingFlight: Identifiable, Hashable, Codable {
     var origin: String
     var scheduledTime: Date
     var actualArrivalTime: Date? // new, preferred
-    var expectedArrivalTime: Date? // new, for E suffix
-    var bagAvailableTime: Date? // NEW: when bags are available for collection
-    var carousel: String? // NEW: baggage carousel number
     var notes: String
-    var cancelled: Bool // new
     // Outgoing flights associated with this incoming flight
     var outgoingLinks: [OutgoingLink]
     var date: Date // Only the day component matters
     
-    init(flightNumber: String, terminal: String, origin: String, scheduledTime: Date, actualArrivalTime: Date? = nil, expectedArrivalTime: Date? = nil, bagAvailableTime: Date? = nil, carousel: String? = nil, notes: String = "", cancelled: Bool = false, date: Date = Date()) {
+    init(flightNumber: String, terminal: String, origin: String, scheduledTime: Date, actualArrivalTime: Date? = nil, notes: String = "", date: Date = Date()) {
         self.id = UUID()
         self.flightNumber = flightNumber
         self.terminal = terminal
         self.origin = origin
         self.scheduledTime = scheduledTime
         self.actualArrivalTime = actualArrivalTime
-        self.expectedArrivalTime = expectedArrivalTime
-        self.bagAvailableTime = bagAvailableTime
-        self.carousel = carousel
         self.notes = notes
-        self.cancelled = cancelled
         self.outgoingLinks = []
         self.date = Calendar.current.startOfDay(for: date)
     }
@@ -40,20 +32,16 @@ struct OutgoingFlight: Identifiable, Hashable, Codable {
     var destination: String
     var scheduledTime: Date
     var actualTime: Date?
-    var expectedTime: Date? // new, for E suffix
-    var cancelled: Bool // new
     // Mapping from incoming flightNumber to bag count
     var bagsFromIncoming: [String: Int]
     
-    init(flightNumber: String, terminal: String, destination: String, scheduledTime: Date, actualTime: Date? = nil, expectedTime: Date? = nil, cancelled: Bool = false) {
+    init(flightNumber: String, terminal: String, destination: String, scheduledTime: Date, actualTime: Date? = nil) {
         self.id = UUID()
         self.flightNumber = flightNumber
         self.terminal = terminal
         self.destination = destination
         self.scheduledTime = scheduledTime
         self.actualTime = actualTime
-        self.expectedTime = expectedTime
-        self.cancelled = cancelled
         self.bagsFromIncoming = [:]
     }
     
