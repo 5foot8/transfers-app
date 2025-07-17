@@ -1309,22 +1309,23 @@ struct LiveFlightRowView: View {
     }
 } 
 
+// Flight Data structure for web import
+struct FlightData: Hashable {
+    let flightNumber: String
+    let time: String
+    let origin: String
+    let terminal: String
+    let airline: String
+    let status: String
+    let isArrival: Bool
+}
+
 // Enhanced Web Import System
 struct EnhancedWebImportView: UIViewControllerRepresentable {
     let url: URL
     let existingFlights: [String] // Flight numbers already in database
     var onFlightSelected: (FlightData) -> Void
     var onFlightDeselected: (FlightData) -> Void
-    
-    struct FlightData: Hashable {
-        let flightNumber: String
-        let time: String
-        let origin: String
-        let terminal: String
-        let airline: String
-        let status: String
-        let isArrival: Bool
-    }
     
     func makeCoordinator() -> Coordinator {
         Coordinator(
@@ -1684,8 +1685,8 @@ struct EnhancedImportSheet: View {
 // Enhanced Departures Web Import View
 struct EnhancedDeparturesWebImportView: UIViewControllerRepresentable {
     let existingFlights: [String]
-    var onFlightSelected: (EnhancedWebImportView.FlightData) -> Void
-    var onFlightDeselected: (EnhancedWebImportView.FlightData) -> Void
+    var onFlightSelected: (FlightData) -> Void
+    var onFlightDeselected: (FlightData) -> Void
     
     func makeCoordinator() -> Coordinator {
         Coordinator(
@@ -1830,11 +1831,11 @@ struct EnhancedDeparturesWebImportView: UIViewControllerRepresentable {
     
     class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
         let existingFlights: [String]
-        let onFlightSelected: (EnhancedWebImportView.FlightData) -> Void
-        let onFlightDeselected: (EnhancedWebImportView.FlightData) -> Void
+        let onFlightSelected: (FlightData) -> Void
+        let onFlightDeselected: (FlightData) -> Void
         weak var webView: WKWebView?
         
-        init(existingFlights: [String], onFlightSelected: @escaping (EnhancedWebImportView.FlightData) -> Void, onFlightDeselected: @escaping (EnhancedWebImportView.FlightData) -> Void) {
+        init(existingFlights: [String], onFlightSelected: @escaping (FlightData) -> Void, onFlightDeselected: @escaping (FlightData) -> Void) {
             self.existingFlights = existingFlights
             self.onFlightSelected = onFlightSelected
             self.onFlightDeselected = onFlightDeselected
@@ -1842,7 +1843,7 @@ struct EnhancedDeparturesWebImportView: UIViewControllerRepresentable {
         
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
             if let dict = message.body as? [String: Any] {
-                let flightData = EnhancedWebImportView.FlightData(
+                let flightData = FlightData(
                     flightNumber: dict["flight_number"] as? String ?? "",
                     time: dict["scheduled_time"] as? String ?? "",
                     origin: dict["origin"] as? String ?? "",
