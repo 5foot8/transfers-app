@@ -62,6 +62,12 @@ struct ContentView: View {
         if let outgoingData = try? encoder.encode(outgoingFlights) {
             UserDefaults.standard.set(outgoingData, forKey: "outgoingFlights")
         }
+        
+        // Sync to Firebase if enabled
+        Task {
+            await FirebaseSync.shared.syncIncomingFlights(incomingFlights)
+            await FirebaseSync.shared.syncOutgoingFlights(outgoingFlights)
+        }
     }
 
     func loadData() {
@@ -188,6 +194,30 @@ struct ContentView: View {
         .onAppear(perform: {
             loadData()
             filterForToday()
+            
+            // Set up notification handling for remote updates
+            NotificationCenter.default.addObserver(
+                forName: .remoteFlightUpdated,
+                object: nil,
+                queue: .main
+            ) { notification in
+                // Handle remote flight updates
+                if let flight = notification.object as? IncomingFlight {
+                    // Update local data if needed
+                    if let index = incomingFlights.firstIndex(where: { $0.id == flight.id }) {
+                        incomingFlights[index] = flight
+                    } else {
+                        incomingFlights.append(flight)
+                    }
+                } else if let flight = notification.object as? OutgoingFlight {
+                    // Update local data if needed
+                    if let index = outgoingFlights.firstIndex(where: { $0.id == flight.id }) {
+                        outgoingFlights[index] = flight
+                    } else {
+                        outgoingFlights.append(flight)
+                    }
+                }
+            }
         })
         .onChange(of: incomingFlights) { _, _ in saveData() }
         .onChange(of: outgoingFlights) { _, _ in saveData() }
@@ -454,8 +484,12 @@ struct MainContentBody: View {
 // 4. Settings sheet view
 struct SettingsSheet: View {
     @Binding var appTheme: AppTheme
+    @ObservedObject var firebaseSync = FirebaseSync.shared
+    @State private var showingSessionSheet = false
+    @State private var sessionIDInput = ""
     var onResetDay: () -> Void
     var onClose: () -> Void
+    
     var body: some View {
         NavigationView {
             Form {
@@ -467,6 +501,60 @@ struct SettingsSheet: View {
                     }
                     .pickerStyle(.segmented)
                 }
+                
+                Section(header: Text("Data Sync")) {
+                    Picker("Sync Mode", selection: $firebaseSync.syncMode) {
+                        ForEach(SyncMode.allCases) { mode in
+                            Text(mode.rawValue).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .onChange(of: firebaseSync.syncMode) { _, newMode in
+                        firebaseSync.setSyncMode(newMode)
+                    }
+                    
+                    if firebaseSync.syncMode != .local {
+                        HStack {
+                            Circle()
+                                .fill(firebaseSync.isConnected ? Color.green : Color.red)
+                                .frame(width: 8, height: 8)
+                            Text(firebaseSync.isConnected ? "Connected" : "Disconnected")
+                                .foregroundColor(firebaseSync.isConnected ? .green : .red)
+                        }
+                        
+                        if let lastSync = firebaseSync.lastSyncTime {
+                            Text("Last sync: \(lastSync, style: .time)")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    
+                    if firebaseSync.syncMode == .live {
+                        if let sessionID = firebaseSync.sessionID {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Session ID:")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                Text(sessionID)
+                                    .font(.caption)
+                                    .padding(4)
+                                    .background(Color.gray.opacity(0.1))
+                                    .cornerRadius(4)
+                            }
+                        } else {
+                            Button("Create Session") {
+                                Task {
+                                    await firebaseSync.createSession()
+                                }
+                            }
+                        }
+                        
+                        Button("Join Session") {
+                            showingSessionSheet = true
+                        }
+                    }
+                }
+                
                 Section {
                     Button(role: .destructive, action: onResetDay) {
                         Label("Reset Day", systemImage: "arrow.clockwise")
@@ -479,6 +567,46 @@ struct SettingsSheet: View {
                     Button("Done") { onClose() }
                 }
             }
+            .sheet(isPresented: $showingSessionSheet) {
+                NavigationView {
+                    VStack(spacing: 20) {
+                        Text("Join Live Session")
+                            .font(.title2)
+                            .padding(.top)
+                        
+                        Text("Enter the session ID to join a live session with other devices:")
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal)
+                        
+                        TextField("Session ID", text: $sessionIDInput)
+                            .textFieldStyle(RoundedBorderTextFieldStyle())
+                            .padding(.horizontal)
+                        
+                        Button("Join") {
+                            Task {
+                                let success = await firebaseSync.joinSession(sessionIDInput)
+                                if success {
+                                    showingSessionSheet = false
+                                    sessionIDInput = ""
+                                }
+                            }
+                        }
+                        .disabled(sessionIDInput.isEmpty)
+                        
+                        Spacer()
+                    }
+                    .navigationTitle("Join Session")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Cancel") {
+                                showingSessionSheet = false
+                                sessionIDInput = ""
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -487,6 +615,8 @@ struct SettingsSheet: View {
 struct HeaderView: View {
     @Binding var showingAddIncoming: Bool
     @Binding var showingSettings: Bool
+    @ObservedObject var firebaseSync = FirebaseSync.shared
+    
     var body: some View {
         HStack(alignment: .bottom) {
             VStack(alignment: .leading, spacing: 2) {
@@ -497,6 +627,20 @@ struct HeaderView: View {
                     .foregroundColor(.secondary)
             }
             Spacer()
+            
+            // Firebase status indicator
+            if firebaseSync.syncMode != .local {
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(firebaseSync.isConnected ? Color.green : Color.red)
+                        .frame(width: 6, height: 6)
+                    Text(firebaseSync.syncMode.rawValue)
+                        .font(.caption2)
+                        .foregroundColor(firebaseSync.isConnected ? .green : .red)
+                }
+                .padding(.horizontal, 4)
+            }
+            
             Button(action: { showingSettings = true }) {
                 Image(systemName: "gearshape")
                     .font(.title2)
